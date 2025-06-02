@@ -34,13 +34,6 @@ See the [LICENSE](./LICENSE) file for details.
 - Anyone who wants Scapy-like power without the CLI
 
 ---
-
-## 📸 Screenshots
-
-> *(Add screenshots or a GIF demo here)*
-
----
-
 ## 📦 Installation
 
 ```bash
