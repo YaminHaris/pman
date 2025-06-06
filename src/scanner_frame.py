@@ -1,6 +1,8 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext
 import psutil
+from scanner_engine_0 import ScannerEngine
+
 
 def get_network_interfaces():
     return list(psutil.net_if_addrs().keys())
@@ -11,17 +13,35 @@ class ScannerFrame(tk.Frame):
         self.start_scan_callback = start_scan_callback
         self.stop_scan_callback = stop_scan_callback
         self.scanning = False
+        self.scanner = None
         self.create_widgets()
+
+    def packet_callback(self, pkt):
+        self.append_output(pkt.summary())
 
     def toggle_scan(self):
         if not self.scanning:
             self.scanning = True
             self.toggle_button.config(text="Stop Scan")
-            self.start_scan_callback(self.get_scan_config())
+
+            config = self.get_scan_config()
+            self.start_scan_callback(config)
+
+            # Initialize scanner with dynamic config
+            self.scanner = ScannerEngine(
+                config["interface"],
+                config["bpf_filter"] or "ip",
+                self.packet_callback
+            )
+            self.scanner.start()
+
         else:
             self.scanning = False
             self.toggle_button.config(text="Start Scan")
             self.stop_scan_callback()
+
+            if self.scanner:
+                self.scanner.stop()
 
     def create_widgets(self):
         self.toggle_button = ttk.Button(self, text="Start Scan", command=self.toggle_scan)

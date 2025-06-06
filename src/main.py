@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk
-from scanner_frame import ScannerFrame  # Import the scanner UI
+from scanner_frame import ScannerFrame  # Import the scanner
+from scanner_engine_0 import ScannerEngine
 
 # Placeholder frames
 class BuilderFrame(tk.Frame):
@@ -61,12 +62,12 @@ class ScapyGUI(tk.Tk):
         print(config)
         self.scanner_frame.append_output("Starting scan with configuration:\n" + str(config))
         # TODO: start scapy sniffing here
-
+ 
     def stop_scan(self):
         print("[STOP SCAN]")
         self.scanner_frame.append_output("Scan stopped.")
         # TODO: stop scapy sniffing here
-
+            
 if __name__ == "__main__":
     app = ScapyGUI()
     app.mainloop()
