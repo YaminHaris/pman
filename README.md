@@ -7,7 +7,9 @@ You may view the source code for learning or evaluation, but **commercial use, m
 See the [LICENSE](./LICENSE) file for details.
 
 
+
 # Pman - Packet Manipulator
+![pmanlogo](https://github.com/user-attachments/assets/36483476-a030-482c-a1df-34fd86ace80d)
 
 **Pman** is a GUI-based packet crafting and manipulation tool that offers the powerful functionality of tools like Scapy, but in a user-friendly, visual interface. Designed for cybersecurity researchers, penetration testers, and network engineers who prefer working with packets in a more intuitive way.
 
