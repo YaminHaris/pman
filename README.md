@@ -35,12 +35,11 @@ See the [LICENSE](./LICENSE) file for details.
 - Cybersecurity researchers testing firewall behavior or crafting exploits
 - Anyone who wants Scapy-like power without the CLI
 
----
 ## 📦 Installation
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-username/pman.git
+git clone https://github.com/YaminHaris/pman.git
 cd pman
 
 # (Optional) Create a virtual environment
@@ -48,7 +47,9 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
-pip install -r requirements.txt
+# (Ensure scapy and tkinter are installed)
+pip install scapy
 
 # Run the GUI
-python pman.py
+python src/main.py
+```
