@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -48,6 +48,12 @@ from core.packet_engine import (
     format_hexdump,
     has_raw_socket_privilege,
     list_interfaces,
+)
+from core.radar import (
+    LanDevice,
+    get_default_gateway_and_cidr,
+    passive_os_fingerprint,
+    scan_lan_radar,
 )
 from core.scapy_builder import (
     COMMON_LAYERS,
@@ -175,6 +181,74 @@ class WorkerThread(QThread):
             self.failed.emit(str(exc))
 
 
+class LanRadarCanvas(QWidget):
+    """Dark-mode circular LAN radar plotting discovered hosts by RTT distance."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setMinimumSize(360, 320)
+        self.local_ip = "127.0.0.1"
+        self.devices: List[LanDevice] = []
+
+    def set_scan_result(self, local_ip: str, devices: List[LanDevice]) -> None:
+        self.local_ip = local_ip
+        self.devices = devices
+        self.update()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802
+        import math
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor("#0d1117"))
+
+        cx, cy = w // 2, h // 2
+        radius = min(w, h) // 2 - 28
+        if radius < 30:
+            return
+
+        # Concentric radar rings
+        p.setPen(QPen(QColor("#1f2d3d"), 1, Qt.DashLine))
+        for frac in (0.33, 0.66, 1.0):
+            r = int(radius * frac)
+            p.drawEllipse(cx - r, cy - r, r * 2, r * 2)
+        p.drawLine(cx - radius, cy, cx + radius, cy)
+        p.drawLine(cx, cy - radius, cx, cy + radius)
+
+        # Center node (This machine)
+        p.setBrush(QBrush(QColor("#58a6ff")))
+        p.setPen(QPen(QColor("#ffffff"), 1.5))
+        p.drawEllipse(cx - 7, cy - 7, 14, 14)
+        p.setFont(QFont("DejaVu Sans", 9, QFont.Bold))
+        p.drawText(cx + 10, cy + 4, f"YOU ({self.local_ip})")
+
+        # Plot discovered LAN devices
+        n = max(1, len(self.devices))
+        for i, dev in enumerate(self.devices):
+            angle = (2 * math.pi * i) / n - math.pi / 4
+            rtt = dev.rtt_ms if dev.rtt_ms is not None else 12.0
+            dist_frac = min(0.92, max(0.32, 0.32 + (rtt / 30.0) * 0.58))
+            dx = int(cx + radius * dist_frac * math.cos(angle))
+            dy = int(cy + radius * dist_frac * math.sin(angle))
+
+            col = QColor("#f0883e") if "Router" in dev.role_hint else (
+                QColor("#3fb950") if "Mobile" in dev.role_hint else QColor("#a371f7")
+            )
+            p.setPen(QPen(QColor("#30363d"), 1))
+            p.drawLine(cx, cy, dx, dy)
+            p.setBrush(QBrush(col))
+            p.setPen(QPen(QColor("#ffffff"), 1))
+            p.drawEllipse(dx - 6, dy - 6, 12, 12)
+            rtt_s = f"{dev.rtt_ms:.1f}ms" if dev.rtt_ms is not None else "?ms"
+            p.setPen(col)
+            p.drawText(dx + 9, dy - 2, f"{dev.ip} ({rtt_s})")
+            p.setPen(QColor("#8b949e"))
+            p.setFont(QFont("DejaVu Sans", 8))
+            p.drawText(dx + 9, dy + 11, dev.role_hint)
+            p.setFont(QFont("DejaVu Sans", 9, QFont.Bold))
+
+
 class PmanMainWindow(QMainWindow):
     packet_arrived = pyqtSignal(object)
 
@@ -205,6 +279,7 @@ class PmanMainWindow(QMainWindow):
         self._build_diagnostics_tab()
         self._build_analytics_tab()
         self._build_console_tab()
+        self._build_radar_tab()
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.status_bar = QStatusBar()
@@ -509,9 +584,88 @@ class PmanMainWindow(QMainWindow):
         btn_run_script.clicked.connect(self._run_console_script)
         self.tabs.addTab(tab, "Scapy Scripting Console")
 
+    # ── Tab 6: Radar & OS Fingerprint ─────────────────────────────────────────
+    def _build_radar_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        top = QHBoxLayout()
+        try:
+            _, _, default_cidr = get_default_gateway_and_cidr()
+        except Exception:
+            default_cidr = "192.168.0.0/24"
+        self.radar_cidr = QLineEdit(default_cidr)
+        btn_scan = QPushButton("▶ Scan LAN & Fingerprint")
+        btn_scan.setObjectName("primary")
+        btn_fp = QPushButton("Refresh Passive OS Fingerprints (PCAP)")
+        btn_fp.setObjectName("accent")
+        top.addWidget(QLabel("Subnet CIDR:"))
+        top.addWidget(self.radar_cidr, 1)
+        top.addWidget(btn_scan)
+        top.addWidget(btn_fp)
+        layout.addLayout(top)
+
+        split = QSplitter(Qt.Horizontal)
+        self.radar_canvas = LanRadarCanvas()
+        split.addWidget(self.radar_canvas)
+
+        right = QSplitter(Qt.Vertical)
+        self.radar_table = QTableWidget(0, 6)
+        self.radar_table.setHorizontalHeaderLabels(["IP", "MAC", "MAC Type", "RTT (ms)", "Services", "Device Hint"])
+        self.radar_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.radar_table.verticalHeader().setVisible(False)
+        right.addWidget(self.radar_table)
+
+        self.os_fp_table = QTableWidget(0, 6)
+        self.os_fp_table.setHorizontalHeaderLabels(["IP (PCAP)", "Pkts", "Seen TTL", "Init TTL", "Est Hops", "Passive OS Guess"])
+        self.os_fp_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        self.os_fp_table.verticalHeader().setVisible(False)
+        right.addWidget(self.os_fp_table)
+        split.addWidget(right)
+        split.setSizes([430, 770])
+        layout.addWidget(split, 1)
+
+        btn_scan.clicked.connect(self._run_lan_radar)
+        btn_fp.clicked.connect(self._refresh_passive_os_fp)
+        self.tabs.addTab(tab, "Radar && OS Fingerprint")
+
+    def _run_lan_radar(self) -> None:
+        cidr = self.radar_cidr.text().strip()
+        iface = self.iface_combo.currentText()
+        self.status_bar.showMessage(f"Scanning {cidr} + mDNS/SSDP...")
+        self._spawn_worker(
+            lambda: scan_lan_radar(cidr=cidr, iface=iface),
+            self._on_lan_radar_done,
+        )
+
+    def _on_lan_radar_done(self, res: Dict[str, Any]) -> None:
+        devices: List[LanDevice] = res["devices"]
+        self.radar_canvas.set_scan_result(str(res["local_ip"]), devices)
+        self.radar_table.setRowCount(len(devices))
+        for i, d in enumerate(devices):
+            vals = [
+                d.ip, d.mac, d.mac_type,
+                f"{d.rtt_ms:.2f}" if d.rtt_ms is not None else "-",
+                d.services, d.role_hint,
+            ]
+            for col, v in enumerate(vals):
+                self.radar_table.setItem(i, col, QTableWidgetItem(v))
+        self.status_bar.showMessage(f"LAN Radar complete: {len(devices)} device(s) on {res['cidr']}")
+
+    def _refresh_passive_os_fp(self) -> None:
+        fps = passive_os_fingerprint(self.store.all())
+        self.os_fp_table.setRowCount(len(fps))
+        for i, fp in enumerate(fps):
+            ttl_str = f"{fp.ttl_min}" if fp.ttl_min == fp.ttl_max else f"{fp.ttl_min}-{fp.ttl_max}"
+            vals = [fp.ip, str(fp.packets), ttl_str, str(fp.est_init_ttl), str(fp.est_hops), fp.os_guess]
+            for col, v in enumerate(vals):
+                self.os_fp_table.setItem(i, col, QTableWidgetItem(v))
+
     def _on_tab_changed(self, idx: int) -> None:
         if idx == 3:
             self._refresh_analytics()
+        elif idx == 5:
+            self._refresh_passive_os_fp()
 
     def _relaunch_elevated(self) -> None:
         import subprocess, sys as _sys

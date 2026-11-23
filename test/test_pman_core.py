@@ -80,10 +80,16 @@ def test_headless_qt_window():
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt5.QtWidgets import QApplication
     from ui.main_window import PmanMainWindow
+    from core.radar import classify_mac, passive_os_fingerprint
+
+    assert "Randomized" in classify_mac("02:20:5a:de:0e:32")
+    assert "Hardware" in classify_mac("40:86:cb:7a:a7:20")
 
     app = QApplication.instance() or QApplication([])
     pcap = os.path.join(SRC_DIR, "01-06-2025 12:17:50_pman.pcap")
     win = PmanMainWindow(sample_pcap=pcap)
     assert win.pkt_table.rowCount() > 0
-    assert win.tabs.count() == 5
+    assert win.tabs.count() == 6
+    fps = passive_os_fingerprint(win.store.all())
+    assert len(fps) > 0
     win.close()
