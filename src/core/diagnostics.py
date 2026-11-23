@@ -44,15 +44,45 @@ def parse_port_spec(spec: str) -> List[int]:
 
 
 def arp_discover(cidr: str, iface: Optional[str] = None, timeout: float = 2.0) -> List[Dict[str, str]]:
-    """Run ARP discovery on a local subnet (requires raw socket / CAP_NET_RAW)."""
-    pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=cidr)
-    kwargs: Dict[str, Any] = {"timeout": timeout, "verbose": False}
-    if iface:
-        kwargs["iface"] = iface
-    ans, _ = srp(pkt, **kwargs)
+    """Run ARP discovery on a local subnet (uses Scapy srp if privileged, else non-root kernel ARP cache sweep)."""
+    import concurrent.futures
+    import ipaddress
+    import subprocess
+    from .packet_engine import has_raw_socket_privilege
+
+    if has_raw_socket_privilege():
+        pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=cidr)
+        kwargs: Dict[str, Any] = {"timeout": timeout, "verbose": False}
+        if iface:
+            kwargs["iface"] = iface
+        ans, _ = srp(pkt, **kwargs)
+        return [{"ip": rcv.psrc, "mac": rcv.hwsrc} for _, rcv in ans]
+
+    net = ipaddress.ip_network(cidr, strict=False)
+    targets = [str(ip) for ip in net.hosts()][:254]
+
+    def _poke(ip: str) -> None:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.05)
+        try:
+            s.sendto(b"\x00", (ip, 62078))
+        except OSError:
+            pass
+        finally:
+            s.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
+        list(ex.map(_poke, targets))
+
+    out = subprocess.check_output(["ip", "neigh", "show"], text=True)
     hosts: List[Dict[str, str]] = []
-    for _, rcv in ans:
-        hosts.append({"ip": rcv.psrc, "mac": rcv.hwsrc})
+    for line in out.splitlines():
+        parts = line.split()
+        if "lladdr" in parts and parts[0] in targets:
+            mac = parts[parts.index("lladdr") + 1]
+            state = parts[-1]
+            if state in ("REACHABLE", "STALE", "DELAY", "PROBE"):
+                hosts.append({"ip": parts[0], "mac": mac})
     return hosts
 
 

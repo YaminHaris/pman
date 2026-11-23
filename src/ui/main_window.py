@@ -735,9 +735,6 @@ class PmanMainWindow(QMainWindow):
         )
 
     def _run_arp_probe(self) -> None:
-        if not has_raw_socket_privilege():
-            self.diag_output.appendPlainText("[!] ARP Discovery requires raw sockets. Click 'Elevate (pkexec)' on Capture tab.")
-            return
         cidr = self.diag_cidr.text().strip()
         iface = self.iface_combo.currentText()
         self.diag_output.appendPlainText(f"[*] Running ARP discovery on {cidr} ({iface})...")
