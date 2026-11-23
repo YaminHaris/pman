@@ -108,16 +108,36 @@ def tcp_port_probe(host: str, ports: List[int], timeout: float = 0.4) -> List[Di
 
 
 def run_traceroute(target: str, max_hops: int = 20, timeout: float = 1.5) -> List[Dict[str, Any]]:
-    """Run Scapy L3 traceroute toward target."""
-    ans, _ = traceroute(target, maxttl=max_hops, timeout=timeout, verbose=False)
-    hops: List[Dict[str, Any]] = []
-    for snd, rcv in ans:
-        hops.append({
-            "ttl": int(snd.ttl),
-            "ip": str(rcv.src),
-            "proto": rcv.lastlayer().name,
-        })
-    hops.sort(key=lambda h: h["ttl"])
+    """Run Scapy L3 traceroute if privileged, else non-root /usr/sbin/traceroute fallback."""
+    import subprocess
+    from .packet_engine import has_raw_socket_privilege
+
+    if has_raw_socket_privilege():
+        ans, _ = traceroute(target, maxttl=max_hops, timeout=timeout, verbose=False)
+        hops: List[Dict[str, Any]] = []
+        for snd, rcv in ans:
+            hops.append({
+                "ttl": int(snd.ttl),
+                "ip": str(rcv.src),
+                "proto": rcv.lastlayer().name,
+            })
+        hops.sort(key=lambda h: h["ttl"])
+        return hops
+
+    out = subprocess.check_output(
+        ["/usr/sbin/traceroute", "-n", "-m", str(max_hops), "-w", "1", "-q", "1", target],
+        text=True,
+        stderr=subprocess.STDOUT,
+    )
+    hops = []
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if not parts or not parts[0].isdigit():
+            continue
+        ttl = int(parts[0])
+        ip = parts[1] if len(parts) > 1 else "*"
+        rtt = parts[2] + " ms" if len(parts) > 3 and parts[1] != "*" else "timeout"
+        hops.append({"ttl": ttl, "ip": ip, "proto": rtt})
     return hops
 
 

@@ -900,9 +900,6 @@ class PmanMainWindow(QMainWindow):
         )
 
     def _run_traceroute_probe(self) -> None:
-        if not has_raw_socket_privilege():
-            self.diag_output.appendPlainText("[!] Scapy Traceroute requires raw sockets. Click 'Elevate (pkexec)' on Capture tab.")
-            return
         target = self.diag_target.text().strip()
         self.diag_output.appendPlainText(f"[*] Running Scapy traceroute to {target}...")
         self._spawn_worker(
