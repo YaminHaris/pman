@@ -195,3 +195,46 @@ def transmit_packet(
         "reply": None,
         "reply_summary": f"Transmitted {count} packet(s) via {'L2' if layer2 else 'L3'}",
     }
+
+
+def transmit_via_os_socket(pkt: Packet, timeout: float = 2.0) -> Dict[str, Any]:
+    """Non-root OS socket fallback for IP/UDP and IP/TCP payload transmission."""
+    import socket as _sock
+
+    if not pkt.haslayer(IP):
+        raise ValueError("OS socket fallback requires an IPv4 layer.")
+    dst = str(pkt[IP].dst)
+    payload = bytes(pkt[Raw].load) if pkt.haslayer(Raw) else b""
+
+    if pkt.haslayer(UDP):
+        dport = int(pkt[UDP].dport)
+        data = bytes(pkt[UDP].payload)
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        s.settimeout(timeout)
+        try:
+            s.sendto(data, (dst, dport))
+            try:
+                rx, addr = s.recvfrom(4096)
+                return {"mode": "OS UDP Socket", "reply_summary": f"Sent {len(data)}B to {dst}:{dport}, received {len(rx)}B from {addr[0]}:{addr[1]}", "rx_bytes": rx}
+            except _sock.timeout:
+                return {"mode": "OS UDP Socket", "reply_summary": f"Sent {len(data)}B UDP datagram to {dst}:{dport} (no reply within {timeout}s)", "rx_bytes": b""}
+        finally:
+            s.close()
+
+    if pkt.haslayer(TCP):
+        dport = int(pkt[TCP].dport)
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect((dst, dport))
+            if payload:
+                s.sendall(payload)
+            try:
+                rx = s.recv(4096)
+                return {"mode": "OS TCP Socket", "reply_summary": f"Connected to {dst}:{dport}, sent {len(payload)}B, received {len(rx)}B", "rx_bytes": rx}
+            except _sock.timeout:
+                return {"mode": "OS TCP Socket", "reply_summary": f"Connected to {dst}:{dport}, sent {len(payload)}B", "rx_bytes": b""}
+        finally:
+            s.close()
+
+    raise ValueError("OS socket fallback supports IP/UDP or IP/TCP packets.")

@@ -1,6 +1,7 @@
 """Packet capture, PCAP I/O, display filtering, dissection, and hex dump helpers."""
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -231,8 +232,20 @@ class PacketStore:
         return out
 
 
+def has_raw_socket_privilege() -> bool:
+    """Return True if current process can open AF_PACKET raw sockets."""
+    try:
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+        s.close()
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        return False
+
+
 class LiveSniffer:
-    """Non-blocking Scapy AsyncSniffer wrapper."""
+    """Non-blocking Scapy AsyncSniffer wrapper with pre-flight privilege check."""
 
     def __init__(self) -> None:
         self._sniffer: Optional[AsyncSniffer] = None
@@ -241,6 +254,12 @@ class LiveSniffer:
     def start(self, iface: str, bpf_filter: str, on_packet: Any, on_error: Any = None) -> None:
         if self.running:
             return
+        if not has_raw_socket_privilege():
+            msg = "Raw packet capture requires root or CAP_NET_RAW. Click 'Elevate (pkexec)' in the toolbar."
+            if on_error:
+                on_error(msg)
+                return
+            raise PermissionError(msg)
         kwargs: dict[str, Any] = {
             "iface": iface if iface else None,
             "prn": on_packet,

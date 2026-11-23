@@ -46,6 +46,7 @@ from core.packet_engine import (
     PacketStore,
     dissect_packet,
     format_hexdump,
+    has_raw_socket_privilege,
     list_interfaces,
 )
 from core.scapy_builder import (
@@ -58,6 +59,7 @@ from core.scapy_builder import (
     packet_to_layer_specs,
     parse_field_value,
     transmit_packet,
+    transmit_via_os_socket,
 )
 from core.script_runner import SCRIPT_PRESETS, run_scapy_script
 
@@ -75,8 +77,7 @@ QTabWidget::pane {
 QTabBar::tab {
     background: #161b22;
     color: #8b949e;
-    padding: 8px 16px;
-    min-width: 145px;
+    padding: 8px 18px;
     border: 1px solid #30363d;
     border-bottom: none;
     margin-right: 2px;
@@ -196,6 +197,7 @@ class PmanMainWindow(QMainWindow):
         self.packet_arrived.connect(self._on_live_packet)
 
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(False)
         self.setCentralWidget(self.tabs)
 
         self._build_capture_tab()
@@ -203,10 +205,12 @@ class PmanMainWindow(QMainWindow):
         self._build_diagnostics_tab()
         self._build_analytics_tab()
         self._build_console_tab()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("Ready — Pman v2.0 (Scapy + PyQt5)")
+        priv = "RAW SOCKET READY" if has_raw_socket_privilege() else "NON-ROOT MODE (click Elevate for live sniff/raw TX)"
+        self.status_bar.showMessage(f"Ready — Pman v2.0 | {priv}")
 
         self._refresh_crafter_stack_list()
         if sample_pcap and os.path.exists(sample_pcap):
@@ -231,6 +235,9 @@ class PmanMainWindow(QMainWindow):
         self.btn_open_pcap = QPushButton("Open PCAP")
         self.btn_save_pcap = QPushButton("Save PCAP")
         self.btn_clear_pkts = QPushButton("Clear")
+        self.btn_elevate = QPushButton("Elevate (pkexec)")
+        self.btn_elevate.setObjectName("accent")
+        self.btn_elevate.setVisible(not has_raw_socket_privilege())
 
         bar.addWidget(QLabel("Interface:"))
         bar.addWidget(self.iface_combo)
@@ -240,6 +247,7 @@ class PmanMainWindow(QMainWindow):
         bar.addWidget(self.btn_open_pcap)
         bar.addWidget(self.btn_save_pcap)
         bar.addWidget(self.btn_clear_pkts)
+        bar.addWidget(self.btn_elevate)
         layout.addLayout(bar)
 
         # Display Filter bar
@@ -287,6 +295,7 @@ class PmanMainWindow(QMainWindow):
         self.btn_open_pcap.clicked.connect(self._open_pcap_dialog)
         self.btn_save_pcap.clicked.connect(self._save_pcap_dialog)
         self.btn_clear_pkts.clicked.connect(self._clear_packets)
+        self.btn_elevate.clicked.connect(self._relaunch_elevated)
         self.btn_apply_filter.clicked.connect(self._refresh_packet_table)
         self.display_filter.returnPressed.connect(self._refresh_packet_table)
         self.pkt_table.itemSelectionChanged.connect(self._on_packet_selected)
@@ -364,11 +373,13 @@ class PmanMainWindow(QMainWindow):
         btn_send_l2 = QPushButton("Send L2 (sendp)")
         btn_sr1 = QPushButton("Send & Receive (sr1)")
         btn_sr1.setObjectName("accent")
+        btn_os_sock = QPushButton("Send via OS Socket (Non-Root)")
         tx_row.addWidget(QLabel("Count:"))
         tx_row.addWidget(self.tx_count)
         tx_row.addWidget(btn_send_l3)
         tx_row.addWidget(btn_send_l2)
         tx_row.addWidget(btn_sr1)
+        tx_row.addWidget(btn_os_sock)
         prev_lay.addLayout(tx_row)
 
         self.crafter_output = QPlainTextEdit()
@@ -384,6 +395,7 @@ class PmanMainWindow(QMainWindow):
         btn_send_l3.clicked.connect(lambda: self._send_crafted(layer2=False, wait_reply=False))
         btn_send_l2.clicked.connect(lambda: self._send_crafted(layer2=True, wait_reply=False))
         btn_sr1.clicked.connect(lambda: self._send_crafted(layer2=False, wait_reply=True))
+        btn_os_sock.clicked.connect(self._send_via_os_socket)
 
         self.tabs.addTab(tab, "Scapy Packet Crafter")
 
@@ -496,6 +508,34 @@ class PmanMainWindow(QMainWindow):
         btn_load_preset.clicked.connect(lambda: self.script_editor.setPlainText(SCRIPT_PRESETS[self.preset_combo.currentText()]))
         btn_run_script.clicked.connect(self._run_console_script)
         self.tabs.addTab(tab, "Scapy Scripting Console")
+
+    def _on_tab_changed(self, idx: int) -> None:
+        if idx == 3:
+            self._refresh_analytics()
+
+    def _relaunch_elevated(self) -> None:
+        import subprocess, sys as _sys
+        script = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "main.py"))
+        env_args = [
+            "pkexec", "env",
+            f"DISPLAY={os.environ.get('DISPLAY', ':0')}",
+            f"XAUTHORITY={os.environ.get('XAUTHORITY', os.path.expanduser('~/.Xauthority'))}",
+            "QT_QPA_PLATFORM=xcb",
+            _sys.executable, script,
+        ]
+        try:
+            subprocess.Popen(env_args)
+            self.status_bar.showMessage("Launched elevated Pman window via pkexec...")
+        except Exception as exc:
+            QMessageBox.warning(self, "Elevation Error", str(exc))
+
+    def _send_via_os_socket(self) -> None:
+        try:
+            pkt = build_scapy_packet(self.crafter_stack)
+            res = transmit_via_os_socket(pkt)
+            self.crafter_output.setPlainText(f"[{res['mode']}] {res['reply_summary']}")
+        except Exception as exc:
+            self.crafter_output.setPlainText(f"[ERROR] {exc}")
 
     # ── Handlers ──────────────────────────────────────────────────────────────
     def _start_capture(self) -> None:
@@ -695,17 +735,23 @@ class PmanMainWindow(QMainWindow):
         )
 
     def _run_arp_probe(self) -> None:
+        if not has_raw_socket_privilege():
+            self.diag_output.appendPlainText("[!] ARP Discovery requires raw sockets. Click 'Elevate (pkexec)' on Capture tab.")
+            return
         cidr = self.diag_cidr.text().strip()
         iface = self.iface_combo.currentText()
         self.diag_output.appendPlainText(f"[*] Running ARP discovery on {cidr} ({iface})...")
         self._spawn_worker(
             lambda: arp_discover(cidr, iface=iface),
             lambda hosts: self.diag_output.appendPlainText(
-                "\n".join(f"  {h['ip']:16s}  {h['mac']}" for h in hosts) or "  No ARP replies (or CAP_NET_RAW required)."
+                "\n".join(f"  {h['ip']:16s}  {h['mac']}" for h in hosts) or "  No ARP replies."
             ),
         )
 
     def _run_traceroute_probe(self) -> None:
+        if not has_raw_socket_privilege():
+            self.diag_output.appendPlainText("[!] Scapy Traceroute requires raw sockets. Click 'Elevate (pkexec)' on Capture tab.")
+            return
         target = self.diag_target.text().strip()
         self.diag_output.appendPlainText(f"[*] Running Scapy traceroute to {target}...")
         self._spawn_worker(
